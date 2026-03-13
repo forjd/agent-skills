@@ -129,7 +129,9 @@ gh_api() {
 }
 
 gh_api_status() {
-  gh api "$@" -i 2>/dev/null | head -1 | awk '{print $2}'
+  local response
+  response=$(gh api "$@" -i 2>/dev/null || true)
+  echo "$response" | head -1 | awk '{print $2}'
 }
 
 # --- Check: Repository settings ---
@@ -526,13 +528,15 @@ fix_branches() {
 
   # If nothing changed, skip the API call
   local branch_changes_count=0
-  for c in "${changes[@]}"; do
-    local cid
-    cid=$(echo "$c" | jq -r '.id')
-    if [[ "$cid" == branches.* ]]; then
-      ((branch_changes_count++))
-    fi
-  done
+  if [[ ${#changes[@]} -gt 0 ]]; then
+    for c in "${changes[@]}"; do
+      local cid
+      cid=$(echo "$c" | jq -r '.id')
+      if [[ "$cid" == branches.* ]]; then
+        ((branch_changes_count++))
+      fi
+    done
+  fi
 
   if [[ "$branch_changes_count" -eq 0 ]]; then
     return
