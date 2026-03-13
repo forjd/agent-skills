@@ -8,6 +8,36 @@ A collection of [agent skills](https://agentskills.io) for the **forjd** organis
 |-------|-------------|
 | [`repo-hardening`](skills/repo-hardening) | Audit and harden GitHub repository security settings via the `gh` CLI |
 
+## Installation
+
+**Via the [Skills CLI](https://skills.sh/docs/cli)** (no setup required):
+
+```bash
+npx skills add forjd/agent-skills
+# or
+bunx skills add forjd/agent-skills
+```
+
+**Via git clone** into your agent's skills directory:
+
+```bash
+# Project-level (one project)
+git clone https://github.com/forjd/agent-skills.git .agents/skills/forjd
+
+# User-level (all projects)
+git clone https://github.com/forjd/agent-skills.git ~/.claude/skills/forjd
+```
+
+| Agent | User-level path |
+|-------|-----------------|
+| Claude Code | `~/.claude/skills/` |
+| Cursor | `~/.cursor/skills/` |
+| Cross-client | `~/.agents/skills/` |
+
+Individual skills can also be copied directly — each `skills/<name>/` directory is self-contained.
+
+> See the [Agent Skills docs](https://agentskills.io/client-implementation/adding-skills-support) for the full list of supported agents and discovery paths.
+
 ## Quick Start
 
 ```bash
