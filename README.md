@@ -7,6 +7,7 @@ A collection of [agent skills](https://agentskills.io) for the **forjd** organis
 | Skill | Description |
 |-------|-------------|
 | [`repo-hardening`](skills/repo-hardening) | Audit and harden GitHub repository security settings via the `gh` CLI |
+| [`github-pr`](skills/github-pr) | Create standardised pull requests with conventional titles, templates, and reviewers |
 
 ## Installation
 
