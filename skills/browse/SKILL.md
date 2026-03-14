@@ -1,18 +1,11 @@
 ---
 name: browse
-description: >
-  Browser automation CLI for AI agents. Use when the user needs to interact
-  with websites, including navigating pages, filling forms, clicking buttons,
-  taking screenshots, extracting data, testing web apps, or automating any
-  browser task. Triggers on "browse", "check the page", "take a screenshot",
-  "test the UI", "fill the form", "click the button", "QA", "visual check",
-  "healthcheck", and any task requiring a real browser.
+description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include "browse", "check the page", "take a screenshot", "test the UI", "fill the form", "click the button", "QA", "visual check", "healthcheck", and any task requiring a real browser.
+allowed-tools: Bash(browse:*)
 compatibility: Requires the browse binary. Install with curl -fsSL https://raw.githubusercontent.com/forjd/browse/main/install.sh | bash
 ---
 
-# Browse — Browser Automation CLI
-
-Fast, lightweight CLI for browser automation. Wraps Playwright behind a persistent daemon for sub-30ms command latency after cold start.
+# Browse — Browser Automation for Agents
 
 ## Setup
 
@@ -28,201 +21,113 @@ If not installed, offer to install it:
 curl -fsSL https://raw.githubusercontent.com/forjd/browse/main/install.sh | bash
 ```
 
-## Architecture
+## How it works
+
+`browse` is a CLI that wraps Playwright behind a persistent daemon on a Unix socket. The daemon cold-starts in ~3s on first use, then every command runs in sub-200ms. Session state (cookies, localStorage, auth tokens) persists across commands within a session.
+
+All output is plain text. Objects are JSON-stringified. Commands return non-zero on failure with an error message.
+
+**Important constraints:**
+- Commands are sequential — do not run multiple `browse` commands in parallel. The daemon handles one command at a time.
+- Run `browse help` for the full command list, or `browse help <command>` for detailed usage and flags.
+
+## The ref system — read this first
+
+Refs (`@e1`, `@e2`, ...) are how you target elements. They replace CSS selectors for most interactions.
+
+**Rules:**
+1. **Always `browse snapshot` before interacting.** Refs only exist after a snapshot.
+2. **Refs are ephemeral.** Every `snapshot` call regenerates them. Old refs are invalid.
+3. **Refs go stale after navigation.** Any `goto` or click that changes the page invalidates refs. You'll get a clear error — just `browse snapshot` again.
+
+**Core interaction loop:**
 
 ```
-CLI ──JSON──▶ Unix socket ──▶ Daemon ──▶ Playwright ──▶ Chromium
+browse snapshot              # see what's on the page — get refs
+browse fill @e3 "test"       # fill the search field
+browse click @e4             # click a button
+browse snapshot              # re-snapshot after the page changes
 ```
 
-- Single daemon auto-starts on first command, idles out after 30 minutes
-- Session persists cookies, localStorage, and auth tokens across commands
-- Sub-30ms latency after cold start (~3s)
+## Workflow
 
-## Core Interaction Pattern
+The standard pattern for any browser task:
 
-**Always follow this loop:** snapshot → interact → snapshot again.
+1. **Navigate:** `browse goto <url>`
+2. **Observe:** `browse snapshot` for page structure (interactive elements with refs). Use `browse snapshot -i` to include structural elements (headings, text), or `-f` for the full accessibility tree.
+3. **Check for errors:** `browse console --level error` after navigation.
+4. **Interact:** `browse fill @eN "value"`, `browse click @eN`, `browse hover @eN`, `browse press Tab`, `browse select @eN "option"`, `browse scroll @eN` (scroll into view).
+   - Use `browse press <key>` for keyboard navigation (Tab, Escape, Enter, ArrowDown, Shift+Tab, etc.). Multiple keys: `browse press Tab Tab Tab`.
+   - Use `browse scroll down/up` to page through content, `browse scroll top/bottom` to jump to extremes.
+   - After clicks that trigger SPA navigation, use `browse wait url /path`, `browse wait text "Expected"`, or `browse wait visible .selector` before snapshotting.
+5. **Verify:** `browse snapshot` or `browse screenshot` after each interaction to confirm the result.
+6. **Repeat:** Move through pages and flows.
 
-```bash
-browse goto https://example.com
-browse snapshot              # assigns refs: @e1, @e2, @e3...
-browse fill @e3 "search"    # interact using refs
-browse click @e4
-browse snapshot              # re-snapshot after page changes
+For configured applications, `browse healthcheck` gives a quick pass/fail across key pages.
+
+## Key commands by category
+
+| Category | Commands |
+|----------|----------|
+| **Navigate** | `goto <url>`, `url`, `back`, `forward`, `reload [--hard]`, `text`, `version`, `quit`, `wipe` |
+| **Observe** | `snapshot`, `screenshot`, `console`, `network` |
+| **Interact** | `click @eN`, `hover @eN [--duration ms]`, `press <key> [key ...]`, `fill @eN "value"`, `select @eN "option"`, `upload @eN <file> [file ...]`, `attr @eN [attribute]`, `scroll down/up/top/bottom/@eN/x y` |
+| **Wait** | `wait url <str>`, `wait text <str>`, `wait visible <sel>`, `wait hidden <sel>`, `wait network-idle`, `wait <ms>` |
+| **Viewport** | `viewport`, `goto --viewport/--device/--preset` |
+| **Evaluate** | `eval <expr>` (in-page JS), `page-eval <expr>` (Playwright page API) |
+| **Auth** | `login --env <name>`, `auth-state save/load <path>` |
+| **Tabs** | `tab list/new/switch/close` |
+| **Assert** | `assert visible/text-contains/url-contains/...` |
+| **Accessibility** | `a11y` (full page), `a11y @eN` (element), `a11y --standard wcag2aa`, `a11y --json` |
+| **Flows** | `flow list`, `flow <name> --var key=value`, `healthcheck` |
+
+Run `browse help <command>` for flags and detailed usage — don't guess at flags.
+
+## Authentication
+
+**Configured login** (preferred — uses `browse.config.json`):
+
+```
+browse login --env staging
 ```
 
-Refs are **ephemeral** — they go stale after any navigation or page mutation. If you get "Refs are stale", run `snapshot` again.
+**Manual login:**
 
-## Command Reference
-
-### Navigation
-
-```bash
-browse goto <url>                          # navigate to URL
-browse goto <url> --preset mobile          # mobile viewport (also: tablet, desktop)
-browse goto <url> --viewport 1280 720      # custom viewport
-browse back                                # browser back
-browse forward                             # browser forward
-browse reload                              # reload (--hard to bypass cache)
-browse url                                 # print current URL
 ```
-
-### Observation
-
-```bash
-browse snapshot                            # list interactive elements with refs
-browse snapshot -i                         # include structural nodes (headings, text)
-browse snapshot -f                         # full accessibility tree
-browse screenshot                          # full-page screenshot to stdout path
-browse screenshot ./shot.png               # save to specific path
-browse screenshot --selector ".modal"      # screenshot specific element
-browse text                                # all visible text content
-browse console                             # show console logs (errors by default)
-browse console --level warning             # filter by level
-browse network                             # show failed requests (4xx/5xx)
-browse network --all                       # show all requests
-```
-
-### Interaction
-
-```bash
-browse click @e3                           # click element
-browse fill @e2 "hello world"             # type into input (clears first)
-browse select @e5 "Option A"              # select dropdown option
-browse hover @e1                           # hover element
-browse hover @e1 --duration 2000          # hover with hold
-browse press Tab                           # keyboard press
-browse press Shift+Tab                     # modified key
-browse scroll down                         # scroll (down/up/top/bottom)
-browse scroll @e7                          # scroll element into view
-browse upload @e4 ./file.pdf              # upload file
-browse attr @e3                            # read all attributes
-browse attr @e3 href                       # read specific attribute
-```
-
-### Waiting
-
-```bash
-browse wait url "dashboard"                # wait for URL to contain string
-browse wait text "Success"                 # wait for text to appear
-browse wait visible @e3                    # wait for element visible
-browse wait hidden ".spinner"              # wait for element to disappear
-browse wait network-idle                   # wait for no pending requests
-browse wait 2000                           # fixed delay (ms)
-```
-
-All wait commands accept `--timeout <ms>` (default 30s).
-
-### JavaScript
-
-```bash
-browse eval "document.title"               # run JS in page context
-browse page-eval "await page.title()"      # run Playwright page operations
-```
-
-### Tabs
-
-```bash
-browse tab list                            # list open tabs
-browse tab new https://example.com         # open new tab
-browse tab switch 1                        # switch to tab by index
-browse tab close                           # close current tab
-```
-
-### Authentication
-
-```bash
-browse login --env staging                 # configured login (from browse.config.json)
-browse auth-state save ./auth.json         # export session (cookies + localStorage)
-browse auth-state load ./auth.json         # import session
-```
-
-### Assertions (for CI/testing)
-
-```bash
-browse assert visible ".submit-btn"        # pass/fail: element visible
-browse assert not-visible ".error"         # pass/fail: element hidden
-browse assert text-contains "Welcome"      # pass/fail: text on page
-browse assert url-contains "/dashboard"    # pass/fail: URL check
-browse assert element-count ".item" 5      # pass/fail: element count
-```
-
-### Accessibility
-
-```bash
-browse a11y                                # WCAG 2.0 AA audit
-browse a11y --standard wcag22aa            # WCAG 2.2 AA
-browse a11y --json                         # machine-readable output
-browse a11y --include ".main-content"      # scope to region
-```
-
-### Lifecycle
-
-```bash
-browse wipe                                # clear all session data
-browse quit                                # shut down daemon
-browse healthcheck                         # run configured health checks
-```
-
-## Common Workflows
-
-### Form filling
-
-```bash
-browse goto https://app.example.com/signup
+browse goto https://app.example.com/login
 browse snapshot
-# Read refs, then fill and submit
-browse fill @e2 "user@example.com"
-browse fill @e3 "password123"
-browse click @e5
-browse wait url "dashboard"
-browse screenshot ./after-signup.png
+browse fill @e1 "user@example.com"
+browse fill @e2 "password123"
+browse click @e3
+browse snapshot        # verify redirect / dashboard loaded
 ```
 
-### QA testing
+**Session reuse** — save after login, load in future sessions:
 
-```bash
-browse goto https://app.example.com
-browse screenshot ./homepage.png
-browse console --level error               # check for JS errors
-browse network                             # check for failed requests
-browse a11y --json                         # accessibility audit
-browse assert visible ".hero-section"
-browse assert text-contains "Welcome"
+```
+browse auth-state save /tmp/auth.json
+browse auth-state load /tmp/auth.json
 ```
 
-### Responsive testing
+Use `browse wipe` to clear all session data before switching accounts or at the end of a session.
 
-```bash
-browse goto https://example.com --preset mobile
-browse screenshot ./mobile.png
-browse goto https://example.com --preset tablet
-browse screenshot ./tablet.png
-browse goto https://example.com --preset desktop
-browse screenshot ./desktop.png
+## Timeout control
+
+Any command accepts `--timeout <ms>` (default 30s). Use for slow pages:
+
+```
+browse goto https://slow-page.example.com --timeout 60000
 ```
 
-### Login then test
+## Error recovery
 
-```bash
-browse login --env staging                 # or manual fill/click flow
-browse goto https://app.example.com/settings
-browse snapshot
-```
-
-## Configuration (optional)
-
-A `browse.config.json` in the project root can define:
-
-- **Environments** — login URLs, credential selectors, success conditions (for `login --env`)
-- **Flows** — reusable multi-step workflows (for `flow <name>`)
-- **Healthchecks** — multi-page verification with assertions (for `healthcheck`)
-
-## Tips
-
-- **Always snapshot before interacting** — you need refs to click/fill/select
-- **Re-snapshot after navigation** — refs go stale when the page changes
-- **Use `wait` before asserting** — SPAs need time to render after navigation
-- **Check `console` and `network`** after page loads to catch errors early
-- **Use `--preset mobile`** on `goto` for responsive testing — don't resize after
-- **Use `screenshot`** liberally — it's cheap and helps debug failures
-- **Use `wipe`** between unrelated test sessions to clear state
+| Error | Fix |
+|-------|-----|
+| `"element is outside of the viewport"` | Run `browse scroll @eN` to scroll it into view, then retry |
+| `"Refs are stale"` / `"Unknown ref"` | Run `browse snapshot` to refresh refs |
+| `"Daemon connection lost"` | Re-run the command — CLI auto-restarts the daemon |
+| `"Command timed out after Nms"` | Use `--timeout 60000`, or check the URL |
+| `"Daemon crashed and recovery failed"` | Run `browse quit`, then retry |
+| `"Unknown command"` for a valid command | Stale daemon — run `browse quit`, then retry |
+| `"Unknown flag"` | Check `browse help <cmd>` for valid flags |
+| Login fails | Check env vars, verify login URL, `browse screenshot` to see the page |
