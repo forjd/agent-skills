@@ -9,6 +9,7 @@ A collection of [agent skills](https://agentskills.io) for the **forjd** organis
 | [`repo-hardening`](skills/repo-hardening) | Audit and harden GitHub repository security settings via the `gh` CLI |
 | [`github-pr`](skills/github-pr) | Create standardised pull requests with conventional titles, templates, and reviewers |
 | [`pr-review-actioner`](skills/pr-review-actioner) | Action PR review feedback — triage, fix, and reply to unresolved review comments |
+| [`browse`](skills/browse) | Browser automation CLI for navigating, testing, screenshotting, and interacting with web pages |
 
 ## Installation
 
