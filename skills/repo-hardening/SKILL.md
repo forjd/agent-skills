@@ -7,6 +7,7 @@ description: >
   lock down GitHub Actions permissions, or apply security best practices.
   Triggers on requests to "harden", "secure", "lock down", or "audit" a
   GitHub repository, even if they just say "make this repo more secure".
+compatibility: Requires gh CLI and jq. Audit can run with read access; fix requires repository admin access.
 ---
 
 # Repo Hardening
@@ -18,9 +19,11 @@ Audit and fix GitHub repository security settings using the bundled `scripts/har
 Before running the script, ensure:
 1. `gh` CLI is installed and authenticated (`gh auth login`)
 2. `jq` is installed
-3. The user has **admin access** to the target repository
+3. The user has sufficient access to the target repository:
+   - `audit` can run with read access, with inaccessible endpoints reported as `skip`
+   - `fix` requires **admin access**
 
-The script checks all three and exits with a clear error if any are missing.
+The script checks prerequisites and exits with a clear error if required tools, authentication, or fix permissions are missing.
 
 ## Workflow
 
@@ -39,19 +42,22 @@ Always follow this sequence:
 
 3. **Present findings** — summarise the audit results to the user, highlighting `fail` and `warn` items grouped by severity (critical > high > medium > low).
 
-4. **Confirm before fixing** — ask the user which categories to fix. Use `--checks` to scope fixes to the confirmed categories. Use `--dry-run` if they want to preview:
+4. **Dry-run before fixing** — ask the user which categories to fix. Use explicit `--checks` to scope fixes to the confirmed categories, then run `--dry-run` before any mutation:
    ```bash
    bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches,security --dry-run
    ```
 
    If branch protection has no existing required status checks, pass each CI context explicitly:
    ```bash
-   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches --required-check "test"
+   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches --required-check "test" --dry-run
    ```
 
-5. **Apply fixes** — once confirmed, keep the same scoped `--checks` and any `--required-check` options from the preview:
+5. **Apply the exact approved plan** — once confirmed, rerun the exact dry-run command with only `--dry-run` removed. Keep the same scoped `--checks` and any `--required-check` options from the preview:
    ```bash
    bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches,security
+
+   # If the approved dry-run included required checks:
+   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches --required-check "test"
    ```
 
 6. **Verify** — run audit again to confirm all checks pass.
@@ -67,14 +73,14 @@ Always follow this sequence:
 | `actions`  | `--checks actions` | Actions permissions, workflow token, PR approval restrictions    |
 | `access`   | `--checks access`  | CODEOWNERS, deploy keys, outside collaborators (report only)    |
 
-Run all categories with `--checks all` (the default).
+Audits run all categories by default. Fixes require an explicit `--checks` value; use `--checks all` only when the user has approved changing every category.
 
 ## Key Options
 
 - `--merge-strategy rebase|squash|any` — which merge method to enforce (default: rebase)
-- `--min-reviewers N` — minimum required PR reviewers (default: 1)
+- `--min-reviewers N` — minimum required PR reviewers, 1-6 (default: 1)
 - `--branch BRANCH` — branch to protect (default: repo's default branch)
-- `--required-check NAME` — required status check context for branch protection; repeat for multiple checks
+- `--required-check NAME` — required status check context to add for branch protection; repeat for multiple checks. Existing required contexts and app-backed checks are preserved.
 - `--format json|text` — output format (default: json)
 
 ## Interpreting Results

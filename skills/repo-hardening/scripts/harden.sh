@@ -10,6 +10,7 @@ VERSION="1.0.0"
 COMMAND=""
 REPO=""
 CHECKS="all"
+CHECKS_EXPLICIT=false
 MERGE_STRATEGY="rebase"
 MIN_REVIEWERS=1
 BRANCH=""
@@ -137,6 +138,17 @@ gh_api_status() {
   echo "$response" | head -1 | awk '{print $2}'
 }
 
+gh_api_paginated_array() {
+  local endpoint="$1"
+  if [[ "$endpoint" == *"?"* ]]; then
+    endpoint="${endpoint}&per_page=100"
+  else
+    endpoint="${endpoint}?per_page=100"
+  fi
+
+  gh api "$endpoint" --paginate 2>/dev/null | jq -s 'add // []' 2>/dev/null || printf '[]'
+}
+
 json_array_from_args() {
   if [[ $# -eq 0 ]]; then
     printf '[]'
@@ -163,6 +175,57 @@ branch_protection_endpoint() {
   local branch_path
   branch_path=$(urlencode "$1")
   printf 'repos/%s/branches/%s/protection' "$REPO" "$branch_path"
+}
+
+BRANCH_PROTECTION_BODY=""
+BRANCH_PROTECTION_ERROR=""
+
+fetch_branch_protection() {
+  local endpoint="$1"
+  local status
+  BRANCH_PROTECTION_BODY=""
+  BRANCH_PROTECTION_ERROR=""
+
+  status=$(gh_api_status "$endpoint")
+  case "$status" in
+    200)
+      BRANCH_PROTECTION_BODY=$(gh api "$endpoint" 2>/dev/null || true)
+      if [[ -z "$BRANCH_PROTECTION_BODY" ]] || ! jq -e type >/dev/null 2>&1 <<< "$BRANCH_PROTECTION_BODY"; then
+        BRANCH_PROTECTION_ERROR="Branch protection returned an empty or invalid JSON response"
+        return 2
+      fi
+      return 0
+      ;;
+    404)
+      return 1
+      ;;
+    "")
+      BRANCH_PROTECTION_ERROR="Could not fetch branch protection status"
+      return 2
+      ;;
+    *)
+      BRANCH_PROTECTION_ERROR="Could not fetch branch protection (HTTP $status)"
+      return 2
+      ;;
+  esac
+}
+
+linear_history_supported() {
+  local repo_data allow_squash allow_rebase
+  repo_data=$(gh_api "repos/$REPO")
+  if [[ -z "$repo_data" || "$repo_data" == "null" ]]; then
+    add_error "branches.linear-history" "Could not fetch repository merge settings before enabling linear history"
+    return 1
+  fi
+
+  allow_squash=$(echo "$repo_data" | jq -r '.allow_squash_merge // false')
+  allow_rebase=$(echo "$repo_data" | jq -r '.allow_rebase_merge // false')
+  if [[ "$allow_squash" != "true" && "$allow_rebase" != "true" ]]; then
+    add_error "branches.linear-history" "Cannot require linear history unless squash or rebase merging is enabled. Run --checks merge first or enable one of those merge strategies."
+    return 1
+  fi
+
+  return 0
 }
 
 # --- Check: Repository settings ---
@@ -365,9 +428,9 @@ check_branches() {
 
   local protection_endpoint protection
   protection_endpoint=$(branch_protection_endpoint "$branch")
-  protection=$(gh_api "$protection_endpoint")
-
-  if [[ -z "$protection" || "$protection" == *"Branch not protected"* || "$protection" == *"Not Found"* ]]; then
+  if fetch_branch_protection "$protection_endpoint"; then
+    protection="$BRANCH_PROTECTION_BODY"
+  elif [[ $? -eq 1 ]]; then
     add_result "branches.protected" "branches" "fail" "No branch protection" "Branch protection enabled" "critical"
     add_result "branches.require-pr" "branches" "fail" "PRs not required" "Require PRs" "critical"
     add_result "branches.require-reviews" "branches" "fail" "No reviews required" ">= $MIN_REVIEWERS reviewer(s)" "critical"
@@ -379,6 +442,9 @@ check_branches() {
     add_result "branches.linear-history" "branches" "fail" "Not configured" "Require linear history" "high"
     add_result "branches.conversation-resolution" "branches" "fail" "Not configured" "Require conversation resolution" "medium"
     add_result "branches.enforce-admins" "branches" "fail" "Not configured" "Enforce for admins" "high"
+    return
+  else
+    add_result "branches.protected" "branches" "skip" "$BRANCH_PROTECTION_ERROR" "Branch protection readable" "critical"
     return
   fi
 
@@ -489,10 +555,15 @@ fix_branches() {
   # Get current protection (may not exist)
   local protection_endpoint protection
   protection_endpoint=$(branch_protection_endpoint "$branch")
-  protection=$(gh_api "$protection_endpoint")
   local has_protection=true
-  if [[ -z "$protection" || "$protection" == *"Branch not protected"* || "$protection" == *"Not Found"* ]]; then
+  if fetch_branch_protection "$protection_endpoint"; then
+    protection="$BRANCH_PROTECTION_BODY"
+  elif [[ $? -eq 1 ]]; then
     has_protection=false
+    protection='{}'
+  else
+    add_error "branches.protection" "$BRANCH_PROTECTION_ERROR"
+    return
   fi
 
   # Read current values to track what changes
@@ -543,13 +614,16 @@ fix_branches() {
   configure_status_checks=false
 
   if [[ "$requested_checks" != "[]" ]]; then
-    desired_contexts="$requested_checks"
-    desired_checks='[]'
+    desired_contexts=$(jq -n \
+      --argjson current "$current_contexts" \
+      --argjson requested "$requested_checks" \
+      '$current + $requested | unique')
     configure_status_checks=true
   elif [[ "$current_status_count" -gt 0 ]]; then
     configure_status_checks=true
   else
     add_error "branches.status-checks" "No required status checks are configured; pass --required-check for each CI check to enforce."
+    return
   fi
 
   desired_status_count=$(jq -n \
@@ -608,6 +682,10 @@ fix_branches() {
   fi
 
   if [[ "$DRY_RUN" == true ]]; then
+    return
+  fi
+
+  if ! linear_history_supported; then
     return
   fi
 
@@ -940,13 +1018,18 @@ check_access() {
     if [[ "$codeowners_status" == "200" ]]; then
       add_result "access.codeowners" "access" "pass" "CODEOWNERS file exists (repo root)" "CODEOWNERS present" "medium"
     else
-      add_result "access.codeowners" "access" "warn" "No CODEOWNERS file found" "CODEOWNERS present" "medium"
+      codeowners_status=$(gh_api_status "repos/$REPO/contents/docs/CODEOWNERS")
+      if [[ "$codeowners_status" == "200" ]]; then
+        add_result "access.codeowners" "access" "pass" "CODEOWNERS file exists (docs directory)" "CODEOWNERS present" "medium"
+      else
+        add_result "access.codeowners" "access" "warn" "No CODEOWNERS file found" "CODEOWNERS present" "medium"
+      fi
     fi
   fi
 
   # Deploy keys
   local deploy_keys
-  deploy_keys=$(gh_api "repos/$REPO/keys")
+  deploy_keys=$(gh_api_paginated_array "repos/$REPO/keys")
   local key_count=0
   if [[ -n "$deploy_keys" && "$deploy_keys" != "null" ]]; then
     key_count=$(echo "$deploy_keys" | jq 'length')
@@ -961,7 +1044,7 @@ check_access() {
 
   # Outside collaborators
   local collaborators
-  collaborators=$(gh_api "repos/$REPO/collaborators?affiliation=outside")
+  collaborators=$(gh_api_paginated_array "repos/$REPO/collaborators?affiliation=outside")
   local collab_count=0
   if [[ -n "$collaborators" && "$collaborators" != "null" ]]; then
     collab_count=$(echo "$collaborators" | jq 'length')
@@ -1014,14 +1097,14 @@ Audit and harden GitHub repository security settings.
 
 Commands:
   audit     Read-only check of repository security settings
-  fix       Apply recommended security settings
+  fix       Apply scoped security settings; requires explicit --checks
 
 Options:
   --repo OWNER/REPO      Target repository (default: inferred by gh)
-  --checks CATEGORIES    Comma-separated categories to check
+  --checks CATEGORIES    Comma-separated categories to check or fix
                          (all,repo,branches,security,merge,actions,access)
   --merge-strategy STR   Merge strategy: rebase|squash|any (default: rebase)
-  --min-reviewers N      Minimum required reviewers (default: 1)
+  --min-reviewers N      Minimum required reviewers, 1-6 (default: 1)
   --branch BRANCH        Branch to protect (default: repo's default branch)
   --required-check NAME  Required status check context for branch protection
                          (repeat for multiple checks)
@@ -1033,10 +1116,10 @@ Options:
 Examples:
   harden.sh audit --repo forjd/my-service
   harden.sh audit --repo forjd/my-service --checks branches,security
-  harden.sh fix --repo forjd/my-service --dry-run
-  harden.sh fix --repo forjd/my-service
-  harden.sh fix --repo forjd/my-service --merge-strategy squash --min-reviewers 2
-  harden.sh fix --repo forjd/my-service --required-check "test"
+  harden.sh fix --repo forjd/my-service --checks branches,security --dry-run
+  harden.sh fix --repo forjd/my-service --checks branches,security
+  harden.sh fix --repo forjd/my-service --checks merge,branches --merge-strategy squash --min-reviewers 2
+  harden.sh fix --repo forjd/my-service --checks branches --required-check "test"
 
 Exit codes:
   0    Success
@@ -1096,6 +1179,7 @@ parse_args() {
         ;;
       --checks)
         CHECKS="${2:?Error: --checks requires a value}"
+        CHECKS_EXPLICIT=true
         validate_checks
         shift 2
         ;;
@@ -1109,8 +1193,8 @@ parse_args() {
         ;;
       --min-reviewers)
         MIN_REVIEWERS="${2:?Error: --min-reviewers requires a value}"
-        if ! [[ "$MIN_REVIEWERS" =~ ^[0-9]+$ ]] || [[ "$MIN_REVIEWERS" -lt 1 ]]; then
-          echo "Error: --min-reviewers must be a positive integer. Received: '$MIN_REVIEWERS'" >&2
+        if ! [[ "$MIN_REVIEWERS" =~ ^[0-9]+$ ]] || [[ "$MIN_REVIEWERS" -lt 1 || "$MIN_REVIEWERS" -gt 6 ]]; then
+          echo "Error: --min-reviewers must be an integer from 1 to 6. Received: '$MIN_REVIEWERS'" >&2
           exit 1
         fi
         shift 2
@@ -1148,8 +1232,13 @@ parse_args() {
         echo "Run 'harden.sh --help' for usage." >&2
         exit 1
         ;;
-    esac
+      esac
   done
+
+  if [[ "$COMMAND" == "fix" && "$CHECKS_EXPLICIT" != true ]]; then
+    echo "Error: fix requires an explicit --checks value. Run audit first, then pass --checks with the categories you intend to change." >&2
+    exit 1
+  fi
 }
 
 # --- Prerequisites ---
@@ -1179,12 +1268,15 @@ check_prerequisites() {
     fi
   fi
 
-  # Check admin access
-  local permission
-  permission=$(gh api "repos/$REPO" --jq '.permissions.admin // false' 2>/dev/null || echo "false")
-  if [[ "$permission" != "true" ]]; then
-    echo "Error: You do not have admin access to '$REPO'. Admin access is required to change repository settings." >&2
-    exit 1
+  # Mutating fixes require admin access. Audits run with the caller's read
+  # permissions and report inaccessible endpoints as skips where possible.
+  if [[ "$COMMAND" == "fix" ]]; then
+    local permission
+    permission=$(gh api "repos/$REPO" --jq '.permissions.admin // false' 2>/dev/null || echo "false")
+    if [[ "$permission" != "true" ]]; then
+      echo "Error: You do not have admin access to '$REPO'. Admin access is required to change repository settings." >&2
+      exit 1
+    fi
   fi
 }
 

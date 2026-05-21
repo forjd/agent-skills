@@ -5,6 +5,7 @@ description: >
   user wants to create a PR, open a pull request, submit changes for review,
   or says things like "PR this", "open a PR", or "submit for review". Enforces
   conventional commit titles, structured body templates, labels, and reviewers.
+compatibility: Requires gh CLI, git, an authenticated GitHub session, committed changes, and a feature branch.
 ---
 
 # GitHub PR Creation
@@ -90,10 +91,18 @@ Fill in the template sections with concrete details from the diff. Remove HTML c
 If a `CODEOWNERS` file exists, read it to identify who should review:
 
 ```bash
-cat .github/CODEOWNERS 2>/dev/null || cat CODEOWNERS 2>/dev/null
+cat .github/CODEOWNERS 2>/dev/null || cat CODEOWNERS 2>/dev/null || cat docs/CODEOWNERS 2>/dev/null
 ```
 
-Use the `--reviewer` flag with relevant code owners. If no CODEOWNERS exists, ask the user who should review.
+Parse CODEOWNERS conservatively. GitHub accepts usernames and team slugs as reviewers, but not email addresses or comments. If ownership is broad, ambiguous, or path-specific in a way that does not clearly match the diff, ask the user who should review.
+
+Before creating the PR, verify requested labels exist:
+
+```bash
+gh label list --limit 200 --json name --jq '.[].name'
+```
+
+Only pass labels that exist. If the intended label is missing, ask whether to omit it or create it. Use the `--reviewer` flag only with validated usernames or team slugs; ask the user when reviewers are ambiguous.
 
 ### 6. Create the PR
 

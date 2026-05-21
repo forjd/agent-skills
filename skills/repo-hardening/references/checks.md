@@ -34,6 +34,8 @@ Detailed documentation of each check, the GitHub API endpoints used, and what th
 
 All branch protection fixes use `PUT /repos/{owner}/{repo}/branches/{branch}/protection`. This endpoint replaces the protection configuration, so the script preserves existing restrictions, dismissal restrictions, bypass allowances, lock settings, fork syncing, and existing required checks while applying the hardened values.
 
+Branch protection reads are status-aware. The script treats only HTTP 404 as "not protected"; permission errors, rate limits, server errors, empty output, and malformed JSON abort the fix rather than rebuilding protection from scratch.
+
 ### branches.protected
 - **Severity**: critical
 - **Why**: Branch protection is the foundation — all other branch checks depend on it being enabled.
@@ -45,7 +47,7 @@ All branch protection fixes use `PUT /repos/{owner}/{repo}/branches/{branch}/pro
 
 ### branches.require-reviews
 - **Severity**: critical
-- **Expected**: `required_approving_review_count >= MIN_REVIEWERS` (default: 1)
+- **Expected**: `required_approving_review_count >= MIN_REVIEWERS` (default: 1, accepted range: 1-6)
 - **Why**: Ensures at least one person reviews every change.
 
 ### branches.dismiss-stale-reviews
@@ -62,7 +64,7 @@ All branch protection fixes use `PUT /repos/{owner}/{repo}/branches/{branch}/pro
 - **Severity**: high
 - **Expected**: `required_status_checks.strict: true` and at least one required context/check
 - **Why**: Requires CI checks to pass before merge. Strict mode requires the branch to be up to date, preventing merge skew. Strict mode with no required contexts/checks does not require CI.
-- **Fix**: Preserves existing required checks. If none exist, pass `--required-check NAME` once for each CI context to enforce.
+- **Fix**: Preserves existing required contexts and app-backed checks. If none exist, pass `--required-check NAME` once for each CI context to enforce. Supplied `--required-check` values are added to existing contexts; they do not replace existing checks.
 
 ### branches.no-force-push
 - **Severity**: critical
@@ -78,6 +80,7 @@ All branch protection fixes use `PUT /repos/{owner}/{repo}/branches/{branch}/pro
 - **Severity**: high
 - **Expected**: `required_linear_history: true`
 - **Why**: Enforces a clean, linear commit history (no merge commits on the default branch).
+- **Dependency**: GitHub requires squash or rebase merging to be enabled before linear history can be required. Run the merge fix first, or include `merge,branches` in the same fix.
 
 ### branches.conversation-resolution
 - **Severity**: medium
@@ -173,18 +176,18 @@ These checks are **report-only** — the `fix` command does not modify them as t
 
 ### access.codeowners
 - **Severity**: medium
-- **API**: `GET /repos/{owner}/{repo}/contents/.github/CODEOWNERS` (also checks repo root)
+- **API**: `GET /repos/{owner}/{repo}/contents/.github/CODEOWNERS` (also checks repo root and `docs/CODEOWNERS`)
 - **Expected**: File exists
 - **Why**: CODEOWNERS defines who must review changes to specific paths. Without it, `require_code_owner_reviews` has no effect.
 
 ### access.deploy-keys
 - **Severity**: medium
-- **API**: `GET /repos/{owner}/{repo}/keys`
+- **API**: `GET /repos/{owner}/{repo}/keys` with pagination
 - **Expected**: Review for necessity
 - **Why**: Deploy keys grant access to the repository. Unused or overly-permissioned keys should be removed.
 
 ### access.outside-collaborators
 - **Severity**: medium
-- **API**: `GET /repos/{owner}/{repo}/collaborators?affiliation=outside`
+- **API**: `GET /repos/{owner}/{repo}/collaborators?affiliation=outside` with pagination
 - **Expected**: Review for necessity
 - **Why**: Outside collaborators have direct access outside of org membership. Ensure all are still needed.

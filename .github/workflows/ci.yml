@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate shell syntax
+        run: bash -n skills/repo-hardening/scripts/harden.sh tests/harden_test.sh
+
+      - name: Run shellcheck
+        run: shellcheck skills/repo-hardening/scripts/harden.sh tests/harden_test.sh
+
+      - name: Validate skill frontmatter
+        run: |
+          ruby -ryaml -e '
+            Dir["skills/*/SKILL.md"].sort.each do |file|
+              text = File.read(file)
+              match = text.match(/\A---\n(.*?)\n---\n/m)
+              abort("#{file}: missing frontmatter") unless match
+              yaml = YAML.safe_load(match[1])
+              name = yaml["name"]
+              description = yaml["description"].to_s
+              dir = File.basename(File.dirname(file))
+              abort("#{file}: name must match directory") unless name == dir
+              abort("#{file}: invalid name") unless name.match?(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/)
+              abort("#{file}: missing description") if description.empty?
+              abort("#{file}: description too long") if description.length > 1024
+            end
+          '
+
+      - name: Validate executable scripts
+        run: test -x skills/repo-hardening/scripts/harden.sh && test -x tests/harden_test.sh
+
+      - name: Validate release version is documented
+        run: |
+          version=$(sed -n 's/^VERSION="\([^"]*\)"/\1/p' skills/repo-hardening/scripts/harden.sh)
+          test -n "$version"
+          grep -q "^## $version$" CHANGELOG.md
+
+      - name: Run regression tests
+        run: tests/harden_test.sh
