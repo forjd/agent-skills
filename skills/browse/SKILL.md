@@ -1,8 +1,14 @@
 ---
 name: browse
-description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include "browse", "check the page", "take a screenshot", "test the UI", "fill the form", "click the button", "QA", "visual check", "healthcheck", and any task requiring a real browser.
+description: >
+  Browser automation CLI for AI agents. Use when the user needs to interact
+  with a web page or web app in a real browser, including navigating pages,
+  filling forms, clicking buttons, taking screenshots, extracting page data,
+  testing rendered UI, or running browser-based health checks. Do not use for
+  code review, API-only checks, generic QA, or general web research unless
+  browser interaction is required.
 allowed-tools: Bash(browse:*)
-compatibility: Requires the browse binary. Install with curl -fsSL https://raw.githubusercontent.com/forjd/browse/main/install.sh | bash
+compatibility: Requires the browse binary. Do not auto-install; ask before installing and prefer a pinned, verifiable release artifact.
 ---
 
 # Browse — Browser Automation for Agents
@@ -15,11 +21,7 @@ Check if `browse` is installed:
 browse version
 ```
 
-If not installed, offer to install it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/forjd/browse/main/install.sh | bash
-```
+If not installed, ask the user before installing. Prefer a pinned release artifact with a published checksum or signature. Do not pipe a mutable remote script directly into `bash`. If the user approves a convenience installer, download it to a temporary file, show the source URL, inspect or verify it where possible, then execute the local file.
 
 ## How it works
 

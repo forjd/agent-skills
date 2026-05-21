@@ -51,6 +51,8 @@ Instructions go here...
 | `metadata`      | Arbitrary key-value pairs (author, version, etc.).             |
 | `allowed-tools` | Space-delimited list of pre-approved tools. (Experimental)     |
 
+Optional fields are client-specific: some agents load them, some ignore them. Put essential prerequisites, safety constraints, and runtime requirements in the skill body as well as in frontmatter.
+
 ### Name rules
 
 - Lowercase alphanumeric and hyphens only
@@ -80,7 +82,7 @@ description: >
 
 Skills use a three-tier loading strategy to manage context efficiently:
 
-1. **Discovery** (~100 tokens): Only `name` and `description` are loaded at startup
+1. **Discovery** (~100 tokens): Only `name` and `description` are reliably loaded at startup
 2. **Activation** (< 5000 tokens recommended): Full `SKILL.md` body loads when the skill matches a task
 3. **Resources** (as needed): Referenced files load only when required
 

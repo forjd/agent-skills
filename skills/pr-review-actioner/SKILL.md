@@ -7,6 +7,7 @@ description: >
   "handle review comments", or "go through the PR comments". Fetches all
   unresolved review threads, triages each as actionable or not, implements
   fixes, and replies with rationale where not actioning.
+compatibility: Requires gh CLI, git, an authenticated GitHub session, and a clean PR branch.
 ---
 
 # PR Review Actioner
@@ -86,9 +87,39 @@ gh api graphql --paginate -f query='
 ' -F owner="$owner" -F repo="$repo" -F number="$number" --jq '.'
 ```
 
-Filter to threads where `isResolved` is `false`. Skip threads where `isOutdated` is `true` (the code has already changed beneath them).
+Filter to threads where `isResolved` is `false`. Do not silently skip outdated unresolved threads. If `isOutdated` is `true`, triage the thread as `Already addressed` when the current code proves the concern was fixed, or as `Needs validation` when the current code still needs review before replying or resolving.
 
 If any thread has `comments.pageInfo.hasNextPage: true`, fetch the remaining comments for that thread before triaging it. Do not silently triage from a partial comment chain.
+
+Use this follow-up query for a specific review thread when the initial thread query returns a partial comment chain:
+
+```bash
+thread_id="PRRT_..."
+
+gh api graphql --paginate -f query='
+  query($threadId: ID!, $endCursor: String) {
+    node(id: $threadId) {
+      ... on PullRequestReviewThread {
+        comments(first: 100, after: $endCursor) {
+          nodes {
+            id
+            databaseId
+            body
+            author {
+              login
+            }
+            createdAt
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+' -F threadId="$thread_id" --jq '.'
+```
 
 If there are no unresolved threads, report that and stop.
 
@@ -106,6 +137,7 @@ For each unresolved thread:
 | **Question** | Reviewer is asking for clarification, not requesting a change | Reply with an explanation |
 | **Disagree** | The suggestion would make the code worse, contradicts project conventions, or is out of scope | Reply with rationale |
 | **Already addressed** | The issue was fixed in a subsequent commit but the thread wasn't resolved | Reply noting which commit addressed it |
+| **Needs validation** | The thread is outdated or ambiguous and the current code must be checked before deciding | Read current code, then reclassify as actionable, already addressed, question, or disagree |
 
 **Important:** Do not blindly agree with every comment. Evaluate each on its merits. A good response to feedback requires technical rigour — if a suggestion is wrong or counterproductive, say so respectfully.
 
@@ -138,15 +170,23 @@ For each actionable item:
 
 1. Read the file
 2. Make the fix
-3. Stage the file: `git add <file>`
+3. Do not stage yet; keep the working tree available for review
 
-After all fixes are staged, commit them together:
+After all fixes are made:
 
 ```bash
+git status --short
+git diff
+```
+
+Present the final diff and ask the user for explicit confirmation before staging, committing, or pushing. When confirmed, stage only agent-owned changes. Prefer `git add -p` for mixed files; use explicit file paths only when each whole file belongs to the fix.
+
+```bash
+git add path/to/changed-file
 git commit -m "fix: address PR review feedback"
 ```
 
-Then push:
+Ask separately before pushing if the user did not already approve publishing the commit:
 
 ```bash
 git push
