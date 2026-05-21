@@ -11,7 +11,7 @@ description: >
 
 # Repo Hardening
 
-Audit and fix GitHub repository security settings using `scripts/harden.sh`.
+Audit and fix GitHub repository security settings using the bundled `scripts/harden.sh`.
 
 ## Prerequisites
 
@@ -26,24 +26,35 @@ The script checks all three and exits with a clear error if any are missing.
 
 Always follow this sequence:
 
-1. **Audit first** — run the audit to see current state:
+1. **Resolve the script path** — run the bundled script via the path to this skill directory, not the current project directory:
    ```bash
-   bash scripts/harden.sh audit --repo OWNER/REPO
+   SKILL_DIR="/path/to/repo-hardening"  # directory containing this SKILL.md
+   HARDEN_SCRIPT="$SKILL_DIR/scripts/harden.sh"
    ```
 
-2. **Present findings** — summarise the audit results to the user, highlighting `fail` and `warn` items grouped by severity (critical > high > medium > low).
-
-3. **Confirm before fixing** — ask the user which issues to fix. Use `--dry-run` if they want to preview:
+2. **Audit first** — run the audit to see current state:
    ```bash
-   bash scripts/harden.sh fix --repo OWNER/REPO --dry-run
+   bash "$HARDEN_SCRIPT" audit --repo OWNER/REPO
    ```
 
-4. **Apply fixes** — once confirmed:
+3. **Present findings** — summarise the audit results to the user, highlighting `fail` and `warn` items grouped by severity (critical > high > medium > low).
+
+4. **Confirm before fixing** — ask the user which categories to fix. Use `--checks` to scope fixes to the confirmed categories. Use `--dry-run` if they want to preview:
    ```bash
-   bash scripts/harden.sh fix --repo OWNER/REPO
+   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches,security --dry-run
    ```
 
-5. **Verify** — run audit again to confirm all checks pass.
+   If branch protection has no existing required status checks, pass each CI context explicitly:
+   ```bash
+   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches --required-check "test"
+   ```
+
+5. **Apply fixes** — once confirmed, keep the same scoped `--checks` and any `--required-check` options from the preview:
+   ```bash
+   bash "$HARDEN_SCRIPT" fix --repo OWNER/REPO --checks branches,security
+   ```
+
+6. **Verify** — run audit again to confirm all checks pass.
 
 ## Check Categories
 
@@ -63,6 +74,7 @@ Run all categories with `--checks all` (the default).
 - `--merge-strategy rebase|squash|any` — which merge method to enforce (default: rebase)
 - `--min-reviewers N` — minimum required PR reviewers (default: 1)
 - `--branch BRANCH` — branch to protect (default: repo's default branch)
+- `--required-check NAME` — required status check context for branch protection; repeat for multiple checks
 - `--format json|text` — output format (default: json)
 
 ## Interpreting Results
@@ -81,8 +93,8 @@ For detailed documentation of each check, see [references/checks.md](references/
 
 To audit all repos in an org:
 ```bash
-gh repo list ORGNAME --json nameWithOwner -q '.[].nameWithOwner' | \
-  while read repo; do bash scripts/harden.sh audit --repo "$repo"; done
+gh repo list ORGNAME --limit 1000 --json nameWithOwner -q '.[].nameWithOwner' | \
+  while read -r repo; do bash "$HARDEN_SCRIPT" audit --repo "$repo"; done
 ```
 
 ## Limitations

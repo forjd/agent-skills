@@ -22,14 +22,20 @@ Create well-structured pull requests using `gh pr create` with consistent format
 ### 1. Check prerequisites
 
 ```bash
-# Confirm not on default branch
-git branch --show-current
+# Determine branches
+current_branch=$(git branch --show-current)
+base_branch=${BASE_BRANCH:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')}
 
-# Ensure branch is pushed to remote
-git push -u origin HEAD
+printf 'current=%s base=%s\n' "$current_branch" "$base_branch"
 ```
 
-If the user is on `main`/`master`, ask them to create a feature branch first.
+If the current branch matches the default/base branch, stop before pushing and ask the user to create a feature branch first.
+
+Once on a feature branch, ensure it is pushed to remote:
+
+```bash
+git push -u origin HEAD
+```
 
 ### 2. Determine PR type
 
@@ -69,11 +75,12 @@ To understand what changed, run:
 
 ```bash
 # See commits on this branch
-git log --oneline main..HEAD
+base_branch=${BASE_BRANCH:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')}
+git log --oneline "$base_branch"..HEAD
 
 # See the full diff
-git diff main...HEAD --stat
-git diff main...HEAD
+git diff "$base_branch"...HEAD --stat
+git diff "$base_branch"...HEAD
 ```
 
 Fill in the template sections with concrete details from the diff. Remove HTML comments. Do not leave placeholder text.
@@ -133,4 +140,4 @@ After creating the PR, show the user:
 - **One PR per feature/fix** — don't bundle unrelated changes
 - **Keep diffs small** — if the diff is large (>500 lines), suggest splitting
 - **Draft PRs** — use `--draft` if the work is still in progress
-- **Base branch** — default to `main`; use `--base` if targeting a different branch
+- **Base branch** — default to the repository default branch from `gh repo view`; use `--base` if targeting a different branch

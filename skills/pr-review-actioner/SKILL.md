@@ -37,16 +37,20 @@ gh pr view <number> --json number,url,headRefName,baseRefName
 
 ### 2. Fetch unresolved review threads
 
-Use GraphQL to get all review threads with their resolution status:
+Use GraphQL pagination to get review threads with their resolution status:
 
 ```bash
-gh api graphql -f query='
-  query($owner: String!, $repo: String!, $number: Int!) {
+number=$(gh pr view --json number --jq '.number')
+owner=$(gh repo view --json owner --jq '.owner.login')
+repo=$(gh repo view --json name --jq '.name')
+
+gh api graphql --paginate -f query='
+  query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $number) {
         reviewDecision
         url
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $endCursor) {
           nodes {
             id
             isResolved
@@ -65,16 +69,26 @@ gh api graphql -f query='
                 }
                 createdAt
               }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
             }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
           }
         }
       }
     }
   }
-' -F owner='{owner}' -F repo='{repo}' -F number={number} --jq '.'
+' -F owner="$owner" -F repo="$repo" -F number="$number" --jq '.'
 ```
 
 Filter to threads where `isResolved` is `false`. Skip threads where `isOutdated` is `true` (the code has already changed beneath them).
+
+If any thread has `comments.pageInfo.hasNextPage: true`, fetch the remaining comments for that thread before triaging it. Do not silently triage from a partial comment chain.
 
 If there are no unresolved threads, report that and stop.
 
@@ -143,13 +157,20 @@ git push
 For each thread where you're not making a code change, post a reply:
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/{number}/comments \
+top_comment_database_id=123456789
+gh api "repos/$owner/$repo/pulls/$number/comments" \
   -X POST \
   -f body="Keeping this as-is — the if/else structure handles the error logging path which would be lost with an early return. Happy to discuss further." \
-  -F in_reply_to_id={top_comment_database_id}
+  -F in_reply_to="$top_comment_database_id"
 ```
 
-`in_reply_to_id` must be the `databaseId` of the **first comment** in the thread (the top-level review comment that started the thread).
+`in_reply_to` must be the `databaseId` of the **first comment** in the thread (the top-level review comment that started the thread). Alternatively, use the dedicated reply endpoint:
+
+```bash
+gh api "repos/$owner/$repo/pulls/$number/comments/$top_comment_database_id/replies" \
+  -X POST \
+  -f body="Keeping this as-is — the if/else structure handles the error logging path which would be lost with an early return. Happy to discuss further."
+```
 
 **Reply tone guidelines:**
 - Be specific — reference the code, not just "I disagree"

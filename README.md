@@ -48,10 +48,10 @@ Individual skills can also be copied directly — each `skills/<name>/` director
 bash skills/repo-hardening/scripts/harden.sh audit --repo forjd/my-service
 
 # Preview fixes without applying
-bash skills/repo-hardening/scripts/harden.sh fix --repo forjd/my-service --dry-run
+bash skills/repo-hardening/scripts/harden.sh fix --repo forjd/my-service --checks branches,security --dry-run
 
-# Apply fixes
-bash skills/repo-hardening/scripts/harden.sh fix --repo forjd/my-service
+# Apply confirmed fixes
+bash skills/repo-hardening/scripts/harden.sh fix --repo forjd/my-service --checks branches,security --required-check "test"
 ```
 
 ## Structure

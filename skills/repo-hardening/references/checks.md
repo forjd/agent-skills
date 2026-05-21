@@ -18,19 +18,21 @@ Detailed documentation of each check, the GitHub API endpoints used, and what th
 
 ### repo.wiki-disabled
 - **Severity**: low
-- **API**: `PATCH /repos/{owner}/{repo}` — `has_wiki`
+- **API**: `GET /repos/{owner}/{repo}` — `has_wiki`
 - **Expected**: `false`
 - **Why**: Disables the wiki if unused, reducing attack surface and avoiding stale documentation.
+- **Fix**: Report-only. The script does not disable wikis automatically because they may contain active project documentation.
 
 ### repo.projects-disabled
 - **Severity**: low
-- **API**: `PATCH /repos/{owner}/{repo}` — `has_projects`
+- **API**: `GET /repos/{owner}/{repo}` — `has_projects`
 - **Expected**: `false`
 - **Why**: Disables projects if unused.
+- **Fix**: Report-only. The script does not disable projects automatically because they may be part of the team's workflow.
 
 ## Branch Protection (`--checks branches`)
 
-All branch protection checks use `PUT /repos/{owner}/{repo}/branches/{branch}/protection`. This is an atomic PUT that replaces the entire protection configuration, so the script reads current settings, merges desired values, and PUTs back.
+All branch protection fixes use `PUT /repos/{owner}/{repo}/branches/{branch}/protection`. This endpoint replaces the protection configuration, so the script preserves existing restrictions, dismissal restrictions, bypass allowances, lock settings, fork syncing, and existing required checks while applying the hardened values.
 
 ### branches.protected
 - **Severity**: critical
@@ -58,8 +60,9 @@ All branch protection checks use `PUT /repos/{owner}/{repo}/branches/{branch}/pr
 
 ### branches.status-checks
 - **Severity**: high
-- **Expected**: `required_status_checks.strict: true`
-- **Why**: Requires CI checks to pass before merge. Strict mode requires the branch to be up to date, preventing merge skew.
+- **Expected**: `required_status_checks.strict: true` and at least one required context/check
+- **Why**: Requires CI checks to pass before merge. Strict mode requires the branch to be up to date, preventing merge skew. Strict mode with no required contexts/checks does not require CI.
+- **Fix**: Preserves existing required checks. If none exist, pass `--required-check NAME` once for each CI context to enforce.
 
 ### branches.no-force-push
 - **Severity**: critical
@@ -149,7 +152,7 @@ All branch protection checks use `PUT /repos/{owner}/{repo}/branches/{branch}/pr
 ### actions.verified-only
 - **Severity**: high
 - **API**: `PUT /repos/{owner}/{repo}/actions/permissions/selected-actions`
-- **Expected**: `github_owned_allowed: true, verified_allowed: true`
+- **Expected**: `github_owned_allowed: true, verified_allowed: true, patterns_allowed: []`
 - **Why**: Only allows actions from GitHub and verified creators.
 
 ### actions.token-read-only

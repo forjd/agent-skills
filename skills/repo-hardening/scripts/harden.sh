@@ -15,6 +15,8 @@ MIN_REVIEWERS=1
 BRANCH=""
 DRY_RUN=false
 FORMAT="json"
+REQUIRED_CHECKS=()
+HAD_ERRORS=false
 
 # --- Output helpers ---
 
@@ -46,6 +48,7 @@ add_change() {
 
 add_error() {
   local id="$1" message="$2"
+  HAD_ERRORS=true
   errors+=("$(jq -n \
     --arg id "$id" \
     --arg message "$message" \
@@ -56,10 +59,10 @@ print_audit_results() {
   local pass=0 fail=0 warn=0 skip=0
   for r in "${results[@]}"; do
     case "$(echo "$r" | jq -r '.status')" in
-      pass) ((pass++)) ;;
-      fail) ((fail++)) ;;
-      warn) ((warn++)) ;;
-      skip) ((skip++)) ;;
+      pass) ((pass += 1)) ;;
+      fail) ((fail += 1)) ;;
+      warn) ((warn += 1)) ;;
+      skip) ((skip += 1)) ;;
     esac
   done
 
@@ -134,6 +137,34 @@ gh_api_status() {
   echo "$response" | head -1 | awk '{print $2}'
 }
 
+json_array_from_args() {
+  if [[ $# -eq 0 ]]; then
+    printf '[]'
+    return
+  fi
+
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+required_checks_json() {
+  if [[ ${#REQUIRED_CHECKS[@]} -eq 0 ]]; then
+    printf '[]'
+    return
+  fi
+
+  json_array_from_args "${REQUIRED_CHECKS[@]}"
+}
+
+urlencode() {
+  jq -rn --arg value "$1" '$value | @uri'
+}
+
+branch_protection_endpoint() {
+  local branch_path
+  branch_path=$(urlencode "$1")
+  printf 'repos/%s/branches/%s/protection' "$REPO" "$branch_path"
+}
+
 # --- Check: Repository settings ---
 
 check_repo_settings() {
@@ -191,11 +222,9 @@ fix_repo_settings() {
     return
   fi
 
-  local delete_on_merge allow_update_branch has_wiki has_projects
+  local delete_on_merge allow_update_branch
   delete_on_merge=$(echo "$repo_data" | jq -r '.delete_branch_on_merge')
   allow_update_branch=$(echo "$repo_data" | jq -r '.allow_update_branch // false')
-  has_wiki=$(echo "$repo_data" | jq -r '.has_wiki')
-  has_projects=$(echo "$repo_data" | jq -r '.has_projects')
 
   local patch='{}'
   if [[ "$delete_on_merge" != "true" ]]; then
@@ -205,14 +234,6 @@ fix_repo_settings() {
   if [[ "$allow_update_branch" != "true" ]]; then
     patch=$(echo "$patch" | jq '. + {allow_update_branch: true}')
     add_change "repo.suggest-update-branch" "updated" "Disabled" "Enabled"
-  fi
-  if [[ "$has_wiki" == "true" ]]; then
-    patch=$(echo "$patch" | jq '. + {has_wiki: false}')
-    add_change "repo.wiki-disabled" "updated" "Wiki enabled" "Wiki disabled"
-  fi
-  if [[ "$has_projects" == "true" ]]; then
-    patch=$(echo "$patch" | jq '. + {has_projects: false}')
-    add_change "repo.projects-disabled" "updated" "Projects enabled" "Projects disabled"
   fi
 
   if [[ "$patch" != "{}" && "$DRY_RUN" == false ]]; then
@@ -342,8 +363,9 @@ check_branches() {
     return
   fi
 
-  local protection
-  protection=$(gh_api "repos/$REPO/branches/$branch/protection")
+  local protection_endpoint protection
+  protection_endpoint=$(branch_protection_endpoint "$branch")
+  protection=$(gh_api "$protection_endpoint")
 
   if [[ -z "$protection" || "$protection" == *"Branch not protected"* || "$protection" == *"Not Found"* ]]; then
     add_result "branches.protected" "branches" "fail" "No branch protection" "Branch protection enabled" "critical"
@@ -399,12 +421,15 @@ check_branches() {
   fi
 
   # Status checks
-  local strict_checks
+  local strict_checks status_check_count
   strict_checks=$(echo "$protection" | jq -r '.required_status_checks.strict // false')
-  if [[ "$strict_checks" == "true" ]]; then
-    add_result "branches.status-checks" "branches" "pass" "Strict status checks enabled" "Require status checks" "high"
+  status_check_count=$(echo "$protection" | jq '((.required_status_checks.contexts // []) | length) + ((.required_status_checks.checks // []) | length)')
+  if [[ "$strict_checks" == "true" && "$status_check_count" -gt 0 ]]; then
+    add_result "branches.status-checks" "branches" "pass" "Strict status checks enabled ($status_check_count required)" "Require status checks" "high"
+  elif [[ "$status_check_count" -eq 0 ]]; then
+    add_result "branches.status-checks" "branches" "fail" "No required status checks configured" "Require at least one status check" "high"
   else
-    add_result "branches.status-checks" "branches" "fail" "Strict status checks disabled" "Require status checks" "high"
+    add_result "branches.status-checks" "branches" "fail" "Strict status checks disabled ($status_check_count required)" "Require strict status checks" "high"
   fi
 
   # Force pushes
@@ -462,8 +487,9 @@ fix_branches() {
   fi
 
   # Get current protection (may not exist)
-  local protection
-  protection=$(gh_api "repos/$REPO/branches/$branch/protection")
+  local protection_endpoint protection
+  protection_endpoint=$(branch_protection_endpoint "$branch")
+  protection=$(gh_api "$protection_endpoint")
   local has_protection=true
   if [[ -z "$protection" || "$protection" == *"Branch not protected"* || "$protection" == *"Not Found"* ]]; then
     has_protection=false
@@ -471,28 +497,65 @@ fix_branches() {
 
   # Read current values to track what changes
   local current_review_count=0
+  local desired_review_count
   local current_dismiss_stale=false
   local current_code_owners=false
   local current_strict=false
   local current_contexts='[]'
+  local current_checks='[]'
+  local current_status_count=0
   local current_enforce_admins=false
   local current_force_push=true
   local current_deletion=true
   local current_linear=false
   local current_conv=false
+  local current_block_creations=false
+  local current_lock_branch=false
+  local current_allow_fork_syncing=false
 
   if [[ "$has_protection" == true ]]; then
     current_review_count=$(echo "$protection" | jq -r '.required_pull_request_reviews.required_approving_review_count // 0')
     current_dismiss_stale=$(echo "$protection" | jq -r '.required_pull_request_reviews.dismiss_stale_reviews // false')
     current_code_owners=$(echo "$protection" | jq -r '.required_pull_request_reviews.require_code_owner_reviews // false')
     current_strict=$(echo "$protection" | jq -r '.required_status_checks.strict // false')
-    current_contexts=$(echo "$protection" | jq '.required_status_checks.contexts // []')
+    current_contexts=$(echo "$protection" | jq -c '.required_status_checks.contexts // []')
+    current_checks=$(echo "$protection" | jq -c '.required_status_checks.checks // []')
+    current_status_count=$(echo "$protection" | jq '((.required_status_checks.contexts // []) | length) + ((.required_status_checks.checks // []) | length)')
     current_enforce_admins=$(echo "$protection" | jq -r '.enforce_admins.enabled // false')
     current_force_push=$(echo "$protection" | jq -r '.allow_force_pushes.enabled // false')
     current_deletion=$(echo "$protection" | jq -r '.allow_deletions.enabled // false')
     current_linear=$(echo "$protection" | jq -r '.required_linear_history.enabled // false')
     current_conv=$(echo "$protection" | jq -r '.required_conversation_resolution.enabled // false')
+    current_block_creations=$(echo "$protection" | jq -r '.block_creations.enabled // false')
+    current_lock_branch=$(echo "$protection" | jq -r '.lock_branch.enabled // false')
+    current_allow_fork_syncing=$(echo "$protection" | jq -r '.allow_fork_syncing.enabled // false')
   fi
+
+  desired_review_count=$MIN_REVIEWERS
+  if [[ "$current_review_count" -gt "$desired_review_count" ]]; then
+    desired_review_count=$current_review_count
+  fi
+
+  local requested_checks desired_contexts desired_checks configure_status_checks desired_status_count
+  requested_checks=$(required_checks_json)
+  desired_contexts="$current_contexts"
+  desired_checks="$current_checks"
+  configure_status_checks=false
+
+  if [[ "$requested_checks" != "[]" ]]; then
+    desired_contexts="$requested_checks"
+    desired_checks='[]'
+    configure_status_checks=true
+  elif [[ "$current_status_count" -gt 0 ]]; then
+    configure_status_checks=true
+  else
+    add_error "branches.status-checks" "No required status checks are configured; pass --required-check for each CI check to enforce."
+  fi
+
+  desired_status_count=$(jq -n \
+    --argjson contexts "$desired_contexts" \
+    --argjson checks "$desired_checks" \
+    '(($contexts // []) | length) + (($checks // []) | length)')
 
   # Track changes
   if [[ "$has_protection" != true ]]; then
@@ -507,8 +570,10 @@ fix_branches() {
   if [[ "$current_code_owners" != "true" ]]; then
     add_change "branches.require-code-owners" "updated" "Disabled" "Enabled"
   fi
-  if [[ "$current_strict" != "true" ]]; then
-    add_change "branches.status-checks" "updated" "Disabled" "Enabled"
+  if [[ "$configure_status_checks" == true ]]; then
+    if [[ "$current_strict" != "true" || "$current_status_count" -eq 0 || "$requested_checks" != "[]" ]]; then
+      add_change "branches.status-checks" "updated" "$current_status_count required check(s), strict=$current_strict" "$desired_status_count required check(s), strict=true"
+    fi
   fi
   if [[ "$current_enforce_admins" != "true" ]]; then
     add_change "branches.enforce-admins" "updated" "Not enforced" "Enforced"
@@ -533,7 +598,7 @@ fix_branches() {
       local cid
       cid=$(echo "$c" | jq -r '.id')
       if [[ "$cid" == branches.* ]]; then
-        ((branch_changes_count++))
+        ((branch_changes_count += 1))
       fi
     done
   fi
@@ -547,29 +612,64 @@ fix_branches() {
   fi
 
   # Build and apply the full protection payload (PUT replaces everything)
-  local payload
+  local source_protection payload
+  source_protection='{}'
+  if [[ "$has_protection" == true ]]; then
+    source_protection="$protection"
+  fi
+
   payload=$(jq -n \
-    --argjson review_count "$MIN_REVIEWERS" \
-    --argjson contexts "$current_contexts" \
+    --argjson protection "$source_protection" \
+    --argjson review_count "$desired_review_count" \
+    --argjson contexts "$desired_contexts" \
+    --argjson checks "$desired_checks" \
+    --argjson configure_status_checks "$configure_status_checks" \
+    --argjson block_creations "$current_block_creations" \
+    --argjson lock_branch "$current_lock_branch" \
+    --argjson allow_fork_syncing "$current_allow_fork_syncing" \
     '{
-      required_pull_request_reviews: {
-        required_approving_review_count: $review_count,
-        dismiss_stale_reviews: true,
-        require_code_owner_reviews: true
-      },
-      required_status_checks: {
+      required_status_checks: (if $configure_status_checks then {
         strict: true,
-        contexts: $contexts
-      },
+        contexts: $contexts,
+        checks: $checks
+      } else null end),
       enforce_admins: true,
+      required_pull_request_reviews: (
+        def actor_names($items): [($items // [])[] | .login // .slug // .name // empty];
+        def actor_set($value):
+          if $value == null then null
+          else {users: actor_names($value.users), teams: actor_names($value.teams), apps: actor_names($value.apps)}
+          end;
+        ($protection.required_pull_request_reviews // {}) as $reviews |
+        {
+          required_approving_review_count: $review_count,
+          dismiss_stale_reviews: true,
+          require_code_owner_reviews: true,
+          require_last_push_approval: ($reviews.require_last_push_approval // false)
+        }
+        + (if $reviews.dismissal_restrictions? != null then {dismissal_restrictions: actor_set($reviews.dismissal_restrictions)} else {} end)
+        + (if $reviews.bypass_pull_request_allowances? != null then {bypass_pull_request_allowances: actor_set($reviews.bypass_pull_request_allowances)} else {} end)
+      ),
+      restrictions: (
+        def actor_names($items): [($items // [])[] | .login // .slug // .name // empty];
+        if $protection.restrictions == null then null
+        else {
+          users: actor_names($protection.restrictions.users),
+          teams: actor_names($protection.restrictions.teams),
+          apps: actor_names($protection.restrictions.apps)
+        }
+        end
+      ),
       required_linear_history: true,
-      required_conversation_resolution: true,
       allow_force_pushes: false,
       allow_deletions: false,
-      restrictions: null
+      block_creations: $block_creations,
+      required_conversation_resolution: true,
+      lock_branch: $lock_branch,
+      allow_fork_syncing: $allow_fork_syncing
     }')
 
-  gh api "repos/$REPO/branches/$branch/protection" \
+  gh api "$protection_endpoint" \
     -X PUT \
     --input - <<< "$payload" > /dev/null 2>&1 || \
     add_error "branches.protection" "Failed to update branch protection"
@@ -721,14 +821,15 @@ check_actions() {
   if [[ "$allowed_actions" == "selected" ]]; then
     local selected
     selected=$(gh_api "repos/$REPO/actions/permissions/selected-actions")
-    local github_owned verified
+    local github_owned verified patterns_count
     github_owned=$(echo "$selected" | jq -r '.github_owned_allowed // false')
     verified=$(echo "$selected" | jq -r '.verified_allowed // false')
+    patterns_count=$(echo "$selected" | jq '(.patterns_allowed // []) | length')
 
-    if [[ "$github_owned" == "true" && "$verified" == "true" ]]; then
+    if [[ "$github_owned" == "true" && "$verified" == "true" && "$patterns_count" -eq 0 ]]; then
       add_result "actions.verified-only" "actions" "pass" "GitHub-owned and verified actions allowed" "Verified actions only" "high"
     else
-      add_result "actions.verified-only" "actions" "fail" "github_owned=$github_owned, verified=$verified" "Verified actions only" "high"
+      add_result "actions.verified-only" "actions" "fail" "github_owned=$github_owned, verified=$verified, patterns=$patterns_count" "Verified actions only, no custom patterns" "high"
     fi
   fi
 
@@ -770,8 +871,8 @@ fix_actions() {
     if [[ "$DRY_RUN" == false ]]; then
       gh api "repos/$REPO/actions/permissions" \
         -X PUT \
-        -f enabled=true \
-        -f allowed_actions=selected > /dev/null 2>&1 || \
+        -F enabled=true \
+        -F allowed_actions=selected > /dev/null 2>&1 || \
         add_error "actions.permissions" "Failed to restrict actions"
     fi
   fi
@@ -780,12 +881,13 @@ fix_actions() {
   local selected
   selected=$(gh_api "repos/$REPO/actions/permissions/selected-actions")
   if [[ -n "$selected" && "$selected" != "null" ]]; then
-    local github_owned verified
+    local github_owned verified patterns_count
     github_owned=$(echo "$selected" | jq -r '.github_owned_allowed // false')
     verified=$(echo "$selected" | jq -r '.verified_allowed // false')
+    patterns_count=$(echo "$selected" | jq '(.patterns_allowed // []) | length')
 
-    if [[ "$github_owned" != "true" || "$verified" != "true" ]]; then
-      add_change "actions.verified-only" "updated" "github_owned=$github_owned, verified=$verified" "github_owned=true, verified=true"
+    if [[ "$github_owned" != "true" || "$verified" != "true" || "$patterns_count" -ne 0 ]]; then
+      add_change "actions.verified-only" "updated" "github_owned=$github_owned, verified=$verified, patterns=$patterns_count" "github_owned=true, verified=true, patterns=0"
       if [[ "$DRY_RUN" == false ]]; then
         gh api "repos/$REPO/actions/permissions/selected-actions" \
           -X PUT \
@@ -893,10 +995,13 @@ run_audit() {
 run_fix() {
   if should_run_check "repo"; then fix_repo_settings; fi
   if should_run_check "security"; then fix_security; fi
-  if should_run_check "branches"; then fix_branches; fi
   if should_run_check "merge"; then fix_merge; fi
+  if should_run_check "branches"; then fix_branches; fi
   if should_run_check "actions"; then fix_actions; fi
   print_fix_results
+  if [[ "$HAD_ERRORS" == true ]]; then
+    return 1
+  fi
 }
 
 # --- CLI ---
@@ -918,6 +1023,8 @@ Options:
   --merge-strategy STR   Merge strategy: rebase|squash|any (default: rebase)
   --min-reviewers N      Minimum required reviewers (default: 1)
   --branch BRANCH        Branch to protect (default: repo's default branch)
+  --required-check NAME  Required status check context for branch protection
+                         (repeat for multiple checks)
   --dry-run              Show what would change without applying (fix only)
   --format FORMAT        Output format: json|text (default: json)
   --help                 Show this help message
@@ -929,11 +1036,31 @@ Examples:
   harden.sh fix --repo forjd/my-service --dry-run
   harden.sh fix --repo forjd/my-service
   harden.sh fix --repo forjd/my-service --merge-strategy squash --min-reviewers 2
+  harden.sh fix --repo forjd/my-service --required-check "test"
 
 Exit codes:
   0    Success
   1    Error (invalid arguments, API failure)
 HELP
+}
+
+validate_checks() {
+  local check
+  local -a check_parts
+  IFS=',' read -r -a check_parts <<< "$CHECKS"
+  for check in "${check_parts[@]}"; do
+    case "$check" in
+      all|repo|branches|security|merge|actions|access) ;;
+      "")
+        echo "Error: --checks contains an empty category." >&2
+        exit 1
+        ;;
+      *)
+        echo "Error: Unknown check category '$check'. Expected one of: all, repo, branches, security, merge, actions, access." >&2
+        exit 1
+        ;;
+    esac
+  done
 }
 
 parse_args() {
@@ -969,6 +1096,7 @@ parse_args() {
         ;;
       --checks)
         CHECKS="${2:?Error: --checks requires a value}"
+        validate_checks
         shift 2
         ;;
       --merge-strategy)
@@ -981,7 +1109,7 @@ parse_args() {
         ;;
       --min-reviewers)
         MIN_REVIEWERS="${2:?Error: --min-reviewers requires a value}"
-        if ! [[ "$MIN_REVIEWERS" =~ ^[0-9]+$ ]]; then
+        if ! [[ "$MIN_REVIEWERS" =~ ^[0-9]+$ ]] || [[ "$MIN_REVIEWERS" -lt 1 ]]; then
           echo "Error: --min-reviewers must be a positive integer. Received: '$MIN_REVIEWERS'" >&2
           exit 1
         fi
@@ -989,6 +1117,10 @@ parse_args() {
         ;;
       --branch)
         BRANCH="${2:?Error: --branch requires a value}"
+        shift 2
+        ;;
+      --required-check)
+        REQUIRED_CHECKS+=("${2:?Error: --required-check requires a value}")
         shift 2
         ;;
       --dry-run)
